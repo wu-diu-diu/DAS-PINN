@@ -95,6 +95,10 @@ class AffineCoupling(nn.Module):
         ## computing jacobian matrix
         log_abs_det_jacobian = torch.log(1 + self.alpha * torch.tanh(s))
         log_abs_det_jacobian = log_abs_det_jacobian.sum(dim=1)
+        # if self.split_size == (self.input_size / 2):
+        #     return torch.cat([u2, x1], dim=1), log_abs_det_jacobian
+        # else:
+        #     return torch.cat([x1, u2], dim=1), log_abs_det_jacobian
         return torch.cat([x1, u2], dim=1), log_abs_det_jacobian
 
     def inverse(self, u):
@@ -517,8 +521,7 @@ class flow_mapping(nn.Module):
         for i in range(self.n_depth):
             self.scale_layers.append(ActNorm(input_size))
             sign *= -1
-            i_split_at = (
-                                     self.n_split_at * sign + self.input_size) % self.input_size  ## i 交替出现为8 2 8 2 从而达到仿射耦合层交叉耦合的效果
+            i_split_at = (self.n_split_at * sign + self.input_size) % self.input_size  ## i 交替出现为8 2 8 2 从而达到仿射耦合层交叉耦合的效果
             self.affine_layers.append(AffineCoupling(input_size,
                                                      i_split_at,
                                                      hidden_size=self.n_width,
@@ -661,11 +664,11 @@ class realNVP_KR_CDF(nn.Module):
 
 class KRnet(nn.Module):
     def __init__(self, base_dist, input_size, n_step, n_depth, width, n_hidden, n_bins=32, r=1.2, bound=50.0,
-                 shrink_rate=1.0, rotation=True, device='cpu'):
+                 shrink_rate=1.0, rotation=True):
         super().__init__()
         self.net = realNVP_KR_CDF(input_size, n_step, n_depth, width, n_hidden, n_bins, r, bound, shrink_rate, rotation)
         self.base_dist = base_dist
-        self.device = device
+        # self.device = device
 
     def forward(self, x):
         z, log_det = self.net.forward(x)
@@ -677,11 +680,11 @@ class KRnet(nn.Module):
 
     def log_prob(self, x):
         z, log_det = self.forward(x)
-        base_log_prob = self.base_dist.log_prob(z.cpu())
+        base_log_prob = self.base_dist.log_prob(z)
         log_prob = base_log_prob.to(device=x.device) + log_det
         return log_prob
 
     def sample(self, n_sample):
-        base_samples = self.base_dist.sample((n_sample,))
-        samples, _ = self.inverse(base_samples.to(device=self.device))
+        base_samples = self.base_dist.sample(n_sample)
+        samples, _ = self.inverse(base_samples)
         return samples
