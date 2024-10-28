@@ -95,10 +95,6 @@ class AffineCoupling(nn.Module):
         ## computing jacobian matrix
         log_abs_det_jacobian = torch.log(1 + self.alpha * torch.tanh(s))
         log_abs_det_jacobian = log_abs_det_jacobian.sum(dim=1)
-        # if self.split_size == (self.input_size / 2):
-        #     return torch.cat([u2, x1], dim=1), log_abs_det_jacobian
-        # else:
-        #     return torch.cat([x1, u2], dim=1), log_abs_det_jacobian
         return torch.cat([x1, u2], dim=1), log_abs_det_jacobian
 
     def inverse(self, u):
@@ -538,7 +534,7 @@ class flow_mapping(nn.Module):
             log_det += tmp_log_det
             z, tmp_log_det = self.affine_layers[i](z)
             log_det += tmp_log_det
-            z = torch.flip(z, (-1,))
+            z = torch.flip(z, (-1,))  ## 这里是为了让仿射耦合层充分混合
         i_split_at = self.n_split_at
         z1 = z[:, :i_split_at]
         z2 = z[:, i_split_at:]
