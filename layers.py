@@ -188,7 +188,7 @@ class ActNorm(nn.Module):
 
     def forward(self, x):
         if not self.data_init:
-            x_mean = torch.mean(x, 0, keepdinm=True)
+            x_mean = torch.mean(x, 0, keepdim=True)
             x_var = torch.mean(torch.square(x - x_mean), 0, keepdim=True)
             self.b_init = -x_mean
             self.logs_init = torch.log(self.scale / (torch.sqrt(x_var) + 1e-6)) / self.logscale_factor
@@ -425,7 +425,7 @@ class scale_and_CDF(nn.Module):
         return z, log_det
 
     def inverse(self, z):
-        print(z.shape)
+        # print(z.shape)
         x = z
         log_det = 0
         x, tmp_log_det = self.cdf_layer.inverse(x)
@@ -517,7 +517,8 @@ class flow_mapping(nn.Module):
         for i in range(self.n_depth):
             self.scale_layers.append(ActNorm(input_size))
             sign *= -1
-            i_split_at = (self.n_split_at * sign + self.input_size) % self.input_size  ## i 交替出现为8 2 8 2 从而达到仿射耦合层交叉耦合的效果
+            i_split_at = (
+                                     self.n_split_at * sign + self.input_size) % self.input_size  ## i 交替出现为8 2 8 2 从而达到仿射耦合层交叉耦合的效果
             self.affine_layers.append(AffineCoupling(input_size,
                                                      i_split_at,
                                                      hidden_size=self.n_width,
@@ -558,6 +559,84 @@ class flow_mapping(nn.Module):
             log_det = log_det + tmp_log_det
             x, tmp_log_det = self.scale_layers[i].inverse(x)
             log_det = log_det + tmp_log_det
+        return x, log_det
+
+
+class realNVP_KR(nn.Module):
+    """ Invertible transformation based on Affine coupling layers and KR structure """
+
+    def __init__(self, input_size, n_step, n_depth, width, n_hidden, shrink_rate=1.0, rotation=True):
+        super().__init__()
+        self.shrink_rate = shrink_rate
+        self.input_size = input_size
+        self.n_step = n_step
+
+        # the number of filtering stages
+        self.n_stage = input_size // n_step
+        if input_size % n_step == 0:
+            self.n_stage -= 1
+
+        self.rotation = rotation
+        self.n_rotation = 1
+
+        if rotation:
+            self.rotations = nn.ModuleList([W_LU(input_size)])
+            for i in range(self.n_rotation - 1):
+                # rotate the coordinate system for a better representation of data
+                self.rotations.append(W_LU(input_size))
+
+        # flow mapping with n_stage
+        self.flow_mappings = []
+        n_width = width
+        for i in range(self.n_stage):
+            # flow_mapping given by such as real NVP
+            n_split_at = input_size - (i + 1) * n_step
+            self.flow_mappings.append(
+                flow_mapping(input_size - i * n_step, n_depth,
+                             n_split_at,
+                             n_width=n_width,
+                             n_hidden=n_hidden))
+            # self.flow_mappings.append(CDF_quadratic(32,input_size-i*n_step,n_depth))
+            n_width = int(n_width * self.shrink_rate)
+        self.flow_mappings = nn.ModuleList(self.flow_mappings)
+        # data will pass the squeezing layer at the end of each stage
+        self.squeezing_layer = Squeezing(input_size, n_step)
+
+    def forward(self, x):
+        z = x
+        log_det = 0
+        for i in range(self.n_stage):
+            if self.rotation and i < self.n_rotation:
+                z, tmp_log_det = self.rotations[i](z)
+                log_det = log_det + tmp_log_det
+            z, tmp_log_det = self.flow_mappings[i](z)
+            log_det = log_det + tmp_log_det
+            z, _ = self.squeezing_layer(z)
+        # base_logprob = self.base_dist.log_prob(z)
+        # log_det=log_det+base_logprob
+        z = torch.cat([z, self.squeezing_layer.x], dim=-1)
+        self.squeezing_layer.x = None
+        return z, log_det
+
+    def inverse(self, z):
+        x = z
+        log_det = 0
+        if self.squeezing_layer.x is not None:
+            store_x_size = self.squeezing_layer.x.shape[-1]
+        else:
+            n_start = self.input_size % self.n_step
+            if n_start == 0:
+                n_start += self.n_step
+            store_x_size = self.input_size - n_start
+        self.squeezing_layer.x = x[:, self.input_size - store_x_size:]
+        x = x[:, :self.input_size - store_x_size]
+        for i in reversed(range(self.n_stage)):
+            x, _ = self.squeezing_layer.inverse(x)
+            x, tmp_log_det = self.flow_mappings[i].inverse(x)
+            log_det = log_det + tmp_log_det
+            if self.rotation and i < self.n_rotation:
+                x, tmp_log_det = self.rotations[i].inverse(x)
+                log_det = log_det + tmp_log_det
         return x, log_det
 
 
@@ -660,11 +739,11 @@ class realNVP_KR_CDF(nn.Module):
 
 class KRnet(nn.Module):
     def __init__(self, base_dist, input_size, n_step, n_depth, width, n_hidden, n_bins=32, r=1.2, bound=50.0,
-                 shrink_rate=1.0, rotation=True):
+                 shrink_rate=1.0, rotation=True, device='gpu'):
         super().__init__()
         self.net = realNVP_KR_CDF(input_size, n_step, n_depth, width, n_hidden, n_bins, r, bound, shrink_rate, rotation)
         self.base_dist = base_dist
-        # self.device = device
+        self.device = device
 
     def forward(self, x):
         z, log_det = self.net.forward(x)
@@ -682,5 +761,5 @@ class KRnet(nn.Module):
 
     def sample(self, n_sample):
         base_samples = self.base_dist.sample(n_sample)
-        samples, _ = self.inverse(base_samples)
+        samples, _ = self.inverse(base_samples.to(device=self.device))
         return samples

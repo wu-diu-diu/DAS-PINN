@@ -31,8 +31,57 @@ class DiagGaussian():
         return log_p
 
 
-x = torch.randn(10,3)
-mu = torch.zeros((1,3))
-cov = torch.eye(3)
-test = DiagGaussian(mu, cov)
-z, log = test.forward(10)
+import deepxde as dde
+import numpy as np
+from deepxde.backend import tf
+
+# 亥姆霍兹方程参数
+k0 = 1.0  # 波数
+
+# 定义 PDE
+def pde(x, u):
+    du_xx = dde.grad.hessian(u, x, i=0, j=0)
+    du_yy = dde.grad.hessian(u, x, i=1, j=1)
+    return du_xx + du_yy + k0**2 * u
+
+# 定义几何域
+geom = dde.geometry.Rectangle(xmin=[0, 0], xmax=[1, 1])  # 1x1 square
+
+# 边界条件
+bc = dde.icbc.DirichletBC(geom, lambda x: 0, lambda _, on_boundary: on_boundary)
+
+# 数据设置
+data = dde.data.PDE(geom, pde, [bc], num_domain=400, num_boundary=100)
+
+# 神经网络模型
+net = dde.nn.FNN([2] + [20] * 3 + [1], "tanh", "Glorot normal")
+
+# PINN模型
+model = dde.Model(data, net)
+
+# 编译模型
+model.compile("adam", lr=1e-3)
+
+# 训练模型
+model.train(iterations=20000)
+
+# 可视化结果
+import matplotlib.pyplot as plt
+
+# 生成测试数据
+x_test = np.linspace(0, 1, 100)
+y_test = np.linspace(0, 1, 100)
+X, Y = np.meshgrid(x_test, y_test)
+xy_test = np.vstack((X.flatten(), Y.flatten())).T
+
+# 预测
+u_pred = model.predict(xy_test)
+
+# 绘制结果
+plt.figure(figsize=(8, 6))
+plt.contourf(X, Y, u_pred.reshape(X.shape), levels=50, cmap='viridis')
+plt.colorbar(label='u(x, y)')
+plt.title('Solution of the Helmholtz Equation')
+plt.xlabel('x')
+plt.ylabel('y')
+plt.show()
